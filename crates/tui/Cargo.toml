@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-localmind_core = { path = "../core", package = "core" }
 crossterm = "0.28"
+localmind_config = { path = "../config", package = "config" }
 ratatui = "0.29"

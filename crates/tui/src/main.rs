@@ -1,198 +1,43 @@
-use std::io;
+use std::env;
+use std::process;
 use std::time::Duration;
 
-use crossterm::cursor;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::prelude::*;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use crossterm::event::{self, Event};
+mod app;
+mod terminal;
+mod ui;
 
-struct TerminalGuard;
+use app::App;
+use app::CommandAction;
+use localmind_config::Config;
+use terminal::TerminalSession;
+use ui::render_ui;
 
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let mut stdout = io::stdout();
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout, LeaveAlternateScreen, cursor::Show);
-    }
-}
-
-struct App {
-    initial_message: String,
-    messages: Vec<String>,
-    input: String,
-    scroll: usize,
-    follow_latest: bool,
-    should_exit: bool,
-}
-
-impl App {
-    fn new() -> Self {
-        let initial_message = "Type anything, press Enter to submit, clear to reset, or type exit to quit.".to_string();
-        Self {
-            messages: vec![initial_message.clone()],
-            initial_message,
-            input: String::new(),
-            scroll: 0,
-            follow_latest: true,
-            should_exit: false,
-        }
-    }
-
-    fn reset_messages(&mut self) {
-        self.messages.clear();
-        self.messages.push(self.initial_message.clone());
-        self.scroll = 0;
-        self.follow_latest = true;
-    }
-
-    fn append_message(&mut self, message: String) {
-        self.messages.push(message);
-        self.follow_latest = true;
-    }
-
-    fn scroll_up(&mut self) {
-        self.follow_latest = false;
-        self.scroll = self.scroll.saturating_sub(1);
-    }
-
-    fn scroll_down(&mut self) {
-        self.follow_latest = false;
-        self.scroll = self.scroll.saturating_add(1).min(self.messages.len().saturating_sub(1));
-    }
-
-    fn sync_scroll(&mut self, viewport_height: u16) {
-        let content_height = self.messages.len();
-        let visible_rows = viewport_height.saturating_sub(2) as usize;
-
-        if visible_rows == 0 || content_height <= visible_rows {
-            self.scroll = 0;
-            return;
-        }
-
-        let max_scroll = content_height.saturating_sub(visible_rows);
-        if self.follow_latest {
-            self.scroll = max_scroll;
-        } else {
-            self.scroll = self.scroll.min(max_scroll);
-        }
-    }
-
-    fn on_key(&mut self, key: crossterm::event::KeyEvent) {
-        if key.kind != KeyEventKind::Press {
-            return;
-        }
-
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_exit = true;
-            }
-            KeyCode::Up => self.scroll_up(),
-            KeyCode::Down => self.scroll_down(),
-            KeyCode::PageUp => {
-                for _ in 0..5 {
-                    self.scroll_up();
-                }
-            }
-            KeyCode::PageDown => {
-                for _ in 0..5 {
-                    self.scroll_down();
-                }
-            }
-            KeyCode::Enter => {
-                let command = self.input.trim().to_string();
-                if command.eq_ignore_ascii_case("exit") {
-                    self.should_exit = true;
-                } else if command.eq_ignore_ascii_case("clear") {
-                    self.reset_messages();
-                } else if !command.is_empty() {
-                    self.append_message(format!("> {command}"));
-                    self.append_message(format!("Received: {command}"));
-                }
-                self.input.clear();
-            }
-            KeyCode::Backspace => {
-                self.input.pop();
-            }
-            KeyCode::Char(ch) => {
-                self.input.push(ch);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn render_ui(frame: &mut Frame, app: &mut App) {
-    let outer = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
-        .split(outer);
-
-    let body = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
-        .split(chunks[0]);
-
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "LOCALMIND ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("interactive shell"),
-    ]))
-    .block(Block::default().borders(Borders::ALL))
-    .style(Style::default().fg(Color::White));
-    frame.render_widget(header, body[0]);
-
-    let transcript: Vec<Line> = app
-        .messages
-        .iter()
-        .map(|message| Line::from(Span::raw(message.clone())))
-        .collect();
-
-    app.sync_scroll(body[1].height);
-
-    let messages = Paragraph::new(transcript)
-        .block(Block::default().title("Session").borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
-        .scroll((app.scroll as u16, 0));
-    frame.render_widget(messages, body[1]);
-
-    let input = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "> ",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(app.input.as_str()),
-    ]))
-    .block(Block::default().title("Command").borders(Borders::ALL));
-    frame.render_widget(input, chunks[1]);
-
-    let cursor_x = chunks[1].x.saturating_add(2 + app.input.len() as u16);
-    let cursor_y = chunks[1].y.saturating_add(1);
-    frame.set_cursor_position((cursor_x, cursor_y));
+enum CliCommand {
+    Run,
+    ConfigView,
+    ConfigEdit,
+    ConfigReset,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
-    let _guard = TerminalGuard;
+    match parse_command() {
+        CliCommand::Run => run_tui()?,
+        CliCommand::ConfigView => view_config()?,
+        CliCommand::ConfigEdit => edit_config()?,
+        CliCommand::ConfigReset => reset_config()?,
+    }
 
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new();
+    Ok(())
+}
+
+fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load_or_setup_interactive()?;
+    let mut session = TerminalSession::new()?;
+    let mut app = App::new(config);
 
     let result = loop {
-        terminal.draw(|frame| render_ui(frame, &mut app))?;
+        session.terminal_mut().draw(|frame| render_ui(frame, &mut app))?;
 
         if app.should_exit {
             break Ok(());
@@ -201,9 +46,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
         {
-            app.on_key(key);
+            match app.on_key(key) {
+                CommandAction::None => {}
+                CommandAction::Exit => app.should_exit = true,
+                CommandAction::Clear => app.push_system_message("Session cleared."),
+                CommandAction::Help => show_help(&mut app),
+                CommandAction::ConfigHelp => show_config_help(&mut app),
+                CommandAction::ConfigView => show_config_view(&mut app)?,
+                CommandAction::ConfigEdit => {
+                    drop(session);
+                    let updated = edit_config_interactive()?;
+                    app.config = updated;
+                    app.push_system_message("Configuration updated.");
+                    session = TerminalSession::new()?;
+                }
+                CommandAction::ConfigReset => {
+                    drop(session);
+                    reset_config_interactive()?;
+                    app.config = Config::load_or_setup_interactive()?;
+                    app.push_system_message("Configuration reset.");
+                    session = TerminalSession::new()?;
+                }
+            }
         }
     };
 
     result
+}
+
+fn show_help(app: &mut App) {
+    app.push_system_message("Available commands:");
+    app.push_system_message("? or help - show this help");
+    app.push_system_message("clear - clear the session messages");
+    app.push_system_message("config - show config commands");
+    app.push_system_message("exit - quit the application");
+}
+
+fn show_config_help(app: &mut App) {
+    app.push_system_message("Config commands:");
+    app.push_system_message("config view - show the stored config");
+    app.push_system_message("config edit - edit the stored config");
+    app.push_system_message("config reset - delete config and re-run setup");
+}
+
+fn show_config_view(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load()?;
+    for line in config.view_string()?.lines() {
+        app.push_system_message(line.to_string());
+    }
+    Ok(())
+}
+
+fn edit_config_interactive() -> Result<Config, Box<dyn std::error::Error>> {
+    Ok(Config::edit_interactive()?)
+}
+
+fn reset_config_interactive() -> Result<(), Box<dyn std::error::Error>> {
+    Config::reset()?;
+    Ok(())
+}
+
+fn view_config() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load()?;
+    print!("{}", config.view_string()?);
+    Ok(())
+}
+
+fn edit_config() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::edit_interactive()?;
+    println!("Saved configuration for {}", config.summary());
+    Ok(())
+}
+
+fn reset_config() -> Result<(), Box<dyn std::error::Error>> {
+    Config::reset()?;
+    println!("Configuration removed. The next run will prompt setup.");
+    Ok(())
+}
+
+fn parse_command() -> CliCommand {
+    let mut args = env::args().skip(1);
+
+    match args.next().as_deref() {
+        None => CliCommand::Run,
+        Some("config") => match args.next().as_deref() {
+            Some("view") => CliCommand::ConfigView,
+            Some("edit") => CliCommand::ConfigEdit,
+            Some("reset") => CliCommand::ConfigReset,
+            Some(other) => usage_and_exit(&format!("Unknown config command: {other}")),
+            None => usage_and_exit("Missing config command."),
+        },
+        Some(other) => usage_and_exit(&format!("Unknown command: {other}")),
+    }
+}
+
+fn usage_and_exit(message: &str) -> ! {
+    eprintln!("{message}");
+    eprintln!("Usage: tui [config view|edit|reset]");
+    process::exit(2);
 }
