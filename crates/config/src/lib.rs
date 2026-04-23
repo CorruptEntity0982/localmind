@@ -1,1 +1,12 @@
-// Intentionally minimal. Add configuration structs and I/O helpers here when needed.
+enum ModelProvider {
+    OPENAI,
+    ANTHROPIC,
+    GEMINI,
+    LOCAL
+}
+
+struct LLMConfig {
+    model_provider: ModelProvider,
+    model_name: String,
+    api_key: String,
+}
